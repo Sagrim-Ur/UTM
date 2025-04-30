@@ -14,11 +14,13 @@ import com.example.unchaintaskmanager.data.PomodoroSession
 import com.example.unchaintaskmanager.data.TaskRepository
 import com.example.unchaintaskmanager.util.UiEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -130,9 +132,11 @@ class PomodoroViewModel @Inject constructor(
                 isWorkPeriod = !isWorkPeriod
                 //Сбрасываем отсчёт для периода, который будем считать дальше
                 _timeLeft.value = if (isWorkPeriod) workDuration else breakDuration
-                if (!isWorkPeriod) startTimer()
                 //Обнуляем сколько времени прошло
-                //if (!isWorkPeriod) startTimer() else onEvent(PomodoroScreenEvent.OnStartPomodoro)
+                if (!isWorkPeriod) startTimer() else {
+                    onPomodoroComplete()
+                }
+
             }
         }.start()
     }
@@ -147,16 +151,6 @@ class PomodoroViewModel @Inject constructor(
         intervalTracker.pause()
 
 
-        //Старый код
-        /*
-        pauseTimeElapsed = if (isWorkPeriod) (workDuration - (_timeLeft.value)) else (breakDuration - (_timeLeft.value)) //фиксируем сколько прошло времени на таймере в момент паузы
-        timer?.cancel() //отменяем
-        isRunning = false //считаем, что таймер не работает
-        isPaused = true //теперь считаем, что на паузе
-        intervalTracker.pause() // 🆕 Пауза через IntervalTracker
-        Log.d("ViewModel", "Помодоро на паузе, прошло $pauseTimeElapsed")
-
-         */
     }
 
     fun resetTimer() {
@@ -176,19 +170,6 @@ class PomodoroViewModel @Inject constructor(
         val stopTimeElapsed = if (isWorkPeriod) (workDuration - (_timeLeft.value)) else (breakDuration - (_timeLeft.value)) //фиксируем сколько прошло времени на таймере в момент паузы
         Log.d("ViewModel", "Помодоро остановлен, прошло $stopTimeElapsed")
         intervalTracker.stop()
-
-
-
-
-        /*
-        timer?.cancel()
-        isWorkPeriod = true
-        _timeLeft.value = workDuration
-        isRunning = false
-        isPaused = false
-        intervalTracker.stop()
-
-         */
     }
 
     fun resumeTimer() {
@@ -202,24 +183,88 @@ class PomodoroViewModel @Inject constructor(
 
     }
 
-    private fun onIntervalComplete()
-    {
+    private fun onIntervalComplete() {
         //Сохраняем в базу в конце каждого интервала
         val totalWorkTimeSoFar = intervalTracker.getTotalWorkTime()
         val totalRestTimeSoFar = intervalTracker.getTotalRestTime()
         viewModelScope.launch {
-            pomodoroSession?.let {
-                pomodoroRepository.updateSession(
-                    it.copy(
-                        endTime = System.currentTimeMillis(),
-                        workDuration = totalWorkTimeSoFar,
-                        restDuration = totalRestTimeSoFar
-                    )
+            try {
+                // В IO-пуле выполняем updateSession, чтобы не блокировать Main-поток
+                withContext(Dispatchers.IO) {
+
+                    pomodoroSession?.let {
+                        pomodoroRepository.updateSession(
+                            it.copy(
+                                endTime = System.currentTimeMillis(),
+                                workDuration = totalWorkTimeSoFar,
+                                restDuration = totalRestTimeSoFar
+                            )
+                        )
+                    }
+                }
+                Log.d(
+                    "ViewModel",
+                    "Сохранено в базу с $totalWorkTimeSoFar рабочего времени, $totalRestTimeSoFar времени отдыха"
                 )
+            } catch (e: Exception) {
+                Log.e("ViewModel", "Ошибка onIntervalComplete", e)
+                //_uiEvent.send(UiEvent.ShowError("Не удалось сохранить промежуточный результат"))
+            }
+
+        }
+    }
+
+    private fun onPomodoroComplete(startNextPomodoro: Boolean = true) {
+        // Сохраняем итоги до сброса
+        val totalWork = intervalTracker.getTotalWorkTime()
+        val totalRest = intervalTracker.getTotalRestTime()
+        viewModelScope.launch {
+            try {
+                // 1) Обновляем текущую сессию
+                pomodoroSession?.let { session ->
+                    withContext(Dispatchers.IO) {
+                        pomodoroRepository.updateSession(
+                            session.copy(
+                                endTime      = System.currentTimeMillis(),
+                                workDuration = totalWork,
+                                restDuration = totalRest
+                            )
+                        )
+                    }
+                }
+
+                if (startNextPomodoro) {
+                    // Создаём новую сессию и сохраняем
+                    // 2) Создаём новую сессию
+                    val newSession = withContext(Dispatchers.IO) {
+                        pomodoroRepository.insertSession(
+                            PomodoroSession(
+                                linkedTaskId = taskId,
+                                startTime = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                    pomodoroSession = newSession
+
+                    // 3) Сбрасываем трекер и стартуем новый таймер на работу
+                    intervalTracker.reset()
+                    isWorkPeriod = true
+                    startTimer()
+                }
+                else {
+                    // Финальное завершение — просто сбрасываем трекер и обнуляем ссылку
+                    intervalTracker.reset()
+                    isRunning = false
+                    isPaused = false
+                    pomodoroSession = null
+                    //Сбрасываем отсчёт для периода, который будем считать дальше
+                    isWorkPeriod = true
+                    _timeLeft.value = workDuration
+                }
+            } catch (e: Exception) {
+                Log.e("ViewModel", "Ошибка при завершении pomodoro", e)
             }
         }
-        Log.d("ViewModel", "Сохранено в базу с $totalRestTimeSoFar рабочего времени, $totalRestTimeSoFar времени отдыха")
-
     }
 
 
@@ -227,145 +272,58 @@ class PomodoroViewModel @Inject constructor(
         when (event) {
             //при переходе на страницу pomodoro с другой страницы по нажатию кнопки, или запуске таймера при нажатии кнопки запустить
             PomodoroScreenEvent.OnStartPomodoro -> {
-                intervalTracker.reset()
-                startTimer()
-
-
-
-                /*
+                isWorkPeriod = true
                 viewModelScope.launch {
 
-                    //определяем стартовое время
-                    val startTime = System.currentTimeMillis()
-
-                    //Сохраняем в базу новый pomodoro
-                    pomodoroSession = pomodoroRepository.insertSession(
-                        PomodoroSession(linkedTaskId = taskId, startTime = startTime)
-                    )
+                    try {
+                    // 1) Сбрасываем трекер до старта
                     intervalTracker.reset()
-                    //Запускаем таймер
+
+                    // 2) Вставляем новую сессию и ждём её готовности
+                    val startTime = System.currentTimeMillis()
+                    val newSession = withContext(Dispatchers.IO) {
+                        pomodoroRepository.insertSession(
+                            PomodoroSession(
+                                linkedTaskId = taskId,
+                                startTime = startTime
+                            )
+                        )
+                    }
+                    pomodoroSession = newSession
+
+                    // 3) Только после вставки — запускаем таймер
                     startTimer()
+                } catch (e: Exception) {
+                    Log.e("ViewModel", "Ошибка создания первой Pomodoro-сессии", e)
+                }
                 }
 
-                 */
+
             }
 
             PomodoroScreenEvent.OnPausePomodoro -> {
             //При нажатии кнопки Пауза
                 pauseTimer()
                 onIntervalComplete()
-                /*
-                pauseTimer()
-                viewModelScope.launch {
-                    pomodoroSession?.let {
-                        if (isWorkPeriod){
-                            pomodoroRepository.updateSession(
-                                it.copy(endTime = System.currentTimeMillis(),
-                                    workDuration = pauseTimeElapsed
-                                )
-                            )
-                        }
 
-                        else {
-                            pomodoroRepository.updateSession(
-                                it.copy(endTime = System.currentTimeMillis(),
-                                    restDuration = pauseTimeElapsed
-                                )
-                            )
-                        }
-
-
-                        //сохраняем endTime при паузе
-
-                        Log.d("ViewModel", "Помодоро на паузе")
-                    }
-                }
-
-
-
-                 */
             }
 
             PomodoroScreenEvent.OnRestartPomodoro -> {
                 //При нажатии кнопки перезапуск
                 resetTimer()
 
-                /*
-                viewModelScope.launch {
-                    pomodoroSession?.let {
-                        pomodoroRepository.updateSession(
-                            it.copy(
-                                startTime = System.currentTimeMillis(),
-                                endTime = null,
-                                workDuration = 0L,
-                                restDuration = 0L
-                            )
-                        )
-                    }
-                }
-                intervalTracker.reset()
-                startTimer()
 
-                 */
             }
 
             PomodoroScreenEvent.OnResumePomodoro -> {
                 //при нажатии кнопки Возобновить (после пазуы)
                 resumeTimer()
-
-                /*
-                resumeTimer() // возобновляем таймер с учётом паузы
-                Log.d("ViewModel", "Помодоро возобновлён")
-
-                 */
-
             }
 
             PomodoroScreenEvent.onFinishPomodoro -> {
-                //При завершении Pomodoro по таймеру
+                //При нажатии кнопки Завершить Pomodoro
                 stopTimer()
-                onIntervalComplete()
-                /*
-                viewModelScope.launch {
-                    pomodoroSession?.let {
-                        val finalWorkDuration = intervalTracker.getTotalWorkTime() // 🆕 Добавлено
-                        val finalRestDuration = intervalTracker.getTotalRestTime() // 🆕 Добавлено
-                        pomodoroRepository.updateSession(
-                            it.copy(endTime = System.currentTimeMillis(),
-                                workDuration = finalWorkDuration,
-                                restDuration = finalRestDuration) //финальный endTime
-                        )
-                    }
-
-                }
-                stopTimer()
-
-                 */
-            }
-
-            PomodoroScreenEvent.onPomodoroTimerStop ->
-            {
-                //При нажатии кнопки завершить
-                stopTimer()
-                onIntervalComplete()
-
-                /*
-                viewModelScope.launch {
-                    pomodoroSession?.let {
-                        val finalWorkDuration = intervalTracker.getTotalWorkTime() // 🆕 Добавлено
-                        val finalRestDuration = intervalTracker.getTotalRestTime() // 🆕 Добавлено
-                        pomodoroRepository.updateSession(
-                            it.copy(endTime = System.currentTimeMillis(),
-                                workDuration = finalWorkDuration,
-                                restDuration = finalRestDuration) //финальный endTime
-                        )
-                    }
-
-                }
-                Log.d("ViewModel", "Помидор записан в базу")
-
-
-                 */
+                onPomodoroComplete(startNextPomodoro = false)
             }
         }
     }
