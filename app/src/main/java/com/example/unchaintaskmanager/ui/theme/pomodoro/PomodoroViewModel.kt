@@ -1,27 +1,34 @@
 package com.example.unchaintaskmanager.ui.theme.pomodoro
 
+import android.content.Context
+import android.content.Intent
 import android.os.CountDownTimer
 import android.util.Log
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.unchaintaskmanager.data.PomodoroRepository
 import com.example.unchaintaskmanager.data.PomodoroSession
 import com.example.unchaintaskmanager.data.TaskRepository
+import com.example.unchaintaskmanager.util.IntervalTracker
 import com.example.unchaintaskmanager.util.UiEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
+import com.example.unchaintaskmanager.data.SessionState
 
 @HiltViewModel
 class PomodoroViewModel @Inject constructor(
@@ -29,6 +36,9 @@ class PomodoroViewModel @Inject constructor(
     private val repository: TaskRepository,
     savedStateHandle: SavedStateHandle
 ): ViewModel() {
+
+    private val _uiState = MutableStateFlow(PomodoroUiState())
+    val uiState: StateFlow<PomodoroUiState> = _uiState.asStateFlow()
 
     //Сколько времени занимает помодоро. Потом поменяем на значение из базы
     private val workDuration = 25 * 60 * 1000L
@@ -76,11 +86,37 @@ class PomodoroViewModel @Inject constructor(
     val taskId = savedStateHandle.get<Int>("taskId")!!
     init {
 
+        // 1) Подписываемся на поток тиков от сервиса
+        viewModelScope.launch {
+            pomodoroRepository.timerFlow.collect { tick ->
+                _uiState.update {
+                    it.copy(
+                        remainingMs  = tick.remainingMs,
+                        isWorkPeriod = tick.isWorkPeriod,
+                        sessionState = tick.sessionState
+                    )
+                }
+            }
+        }
+
+        // 2) Однократно загружаем последнее сохранённое состояние
+        viewModelScope.launch {
+            pomodoroRepository.loadState()?.let { state ->
+                _uiState.update {
+                    it.copy(
+                        remainingMs  = state.remainingMs,
+                        isWorkPeriod = state.isWorkPeriod,
+                        sessionState = state.sessionState
+                    )
+                }
+            }
+        }
+
+
     //Зачем вот это? Потому что при переходе на экран Pomodoro мы передаём через SavedStateHandle id задачи, на которой была нажата кнопка запуска pomodoro
 
             Log.d("ViewModel", "Полученный taskId: $taskId")  // 🔍 Проверка
             defineTaskName()
-
         }
 
     private fun defineTaskName() {
@@ -149,8 +185,6 @@ class PomodoroViewModel @Inject constructor(
         Log.d("ViewModel", "Помодоро на паузе, прошло $pauseTimeElapsed")
         // Фиксируем паузу в трекере
         intervalTracker.pause()
-
-
     }
 
     fun resetTimer() {
@@ -181,6 +215,33 @@ class PomodoroViewModel @Inject constructor(
             startTimer(unpauseOffset) //перезапускаем с учётом паузы
         }
 
+    }
+
+    /**
+     * Прибавляет к текущему таймеру addMs миллисекунд **без ограничения сверху**.
+     * Если таймер был запущен — перезапускаем его с новым offset,
+     * если на паузе — просто обновляем _timeLeft и ждём возобновления.
+     */
+    private fun addTimeToTimer(addMs: Long) {
+        // Отменяем старый CountDownTimer
+        timer?.cancel()
+
+        // Вычисляем новую оставшуюся длительность
+        val newTimeLeft = _timeLeft.value + addMs
+        _timeLeft.value = newTimeLeft
+
+        // Если таймер в работе — пересчитываем offset и перезапускаем
+        if (isRunning) {
+            // Берём «базовую» длительность текущего периода
+            val base = if (isWorkPeriod) workDuration else breakDuration
+            // offset = сколько уже прошло: базовая минус текущее left —
+            // если newTimeLeft > base, offset получится отрицательным, и startTimer
+            // даст duration = base - offset = newTimeLeft
+            val offset = base - newTimeLeft
+            startTimer(offset)
+        }
+        // Если на паузе — оставляем isPaused = true,
+        // и при resumeTimer() таймер продолжит с этим новым _timeLeft
     }
 
     private fun onIntervalComplete() {
@@ -214,7 +275,7 @@ class PomodoroViewModel @Inject constructor(
         }
     }
 
-    private fun onPomodoroComplete(startNextPomodoro: Boolean = true) {
+    private fun onPomodoroComplete(startNextPomodoro: Boolean = false) {
         // Сохраняем итоги до сброса
         val totalWork = intervalTracker.getTotalWorkTime()
         val totalRest = intervalTracker.getTotalRestTime()
@@ -325,7 +386,64 @@ class PomodoroViewModel @Inject constructor(
                 stopTimer()
                 onPomodoroComplete(startNextPomodoro = false)
             }
+
+            PomodoroScreenEvent.plusFifteenMinutesToPomodoro -> {
+                addTimeToTimer(15 * 60_000L)
+            }
+            PomodoroScreenEvent.plusFiveMinutesToPomodoro -> { addTimeToTimer(5 * 60_000L) }
+            PomodoroScreenEvent.plusThirtyMinutesToPomodoro -> { addTimeToTimer(30 * 60_000L) }
         }
     }
 
+
+    fun startPomodoro(context: Context, taskId: Int, offsetMs: Long = 0L) {
+        Intent(context, PomodoroService::class.java).also {
+            it.action = PomodoroService.ACTION_START
+            it.putExtra(PomodoroService.EXTRA_TASK_ID, taskId)
+            it.putExtra(PomodoroService.EXTRA_OFFSET, offsetMs)
+            ContextCompat.startForegroundService(context, it)
+        }
+    }
+
+    fun pausePomodoro(context: Context) {
+        Intent(context, PomodoroService::class.java).also {
+            it.action = PomodoroService.ACTION_PAUSE
+            ContextCompat.startForegroundService(context, it)
+        }
+        Log.d("ViewModel", "Функция паузы во ViewModel отработала")
+    }
+
+    fun resumePomodoro(context: Context) {
+        Intent(context, PomodoroService::class.java).also {
+            it.action = PomodoroService.ACTION_RESUME
+            ContextCompat.startForegroundService(context, it)
+        }
+        Log.d("ViewModel", "Функция возобновления во ViewModel отработала")}
+
+
+
+    fun addTime(context: Context, ms: Long) {
+        Intent(context, PomodoroService::class.java).also {
+            it.action = PomodoroService.ACTION_ADD_TIME
+            it.putExtra(PomodoroService.EXTRA_OFFSET, ms)
+            ContextCompat.startForegroundService(context, it)
+        }
+    }
+
+    fun stopPomodoro(context: Context) {
+        Intent(context, PomodoroService::class.java).also {
+            it.action = PomodoroService.ACTION_STOP
+            ContextCompat.startForegroundService(context, it)      // ← обычный startService
+        }
+    }
+
+    fun resetPomodoro(context: Context) {
+        Intent(context, PomodoroService::class.java).also {
+            it.action = PomodoroService.ACTION_RESET
+            ContextCompat.startForegroundService(context, it)      // ← обычный startService
+        }
+    }
+
+
 }
+

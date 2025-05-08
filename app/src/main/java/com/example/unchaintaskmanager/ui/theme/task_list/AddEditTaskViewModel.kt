@@ -48,6 +48,10 @@ class AddEditTaskViewModel @Inject constructor(
     val pomodoroSessions: StateFlow<List<PomodoroSession>> =
         _pomodoroSessions
 
+    // 2) StateFlow для суммарного времени (мс)
+    private val _totalPomodoroTimeMs = MutableStateFlow(0L)
+    val totalPomodoroTimeMs: StateFlow<Long> = _totalPomodoroTimeMs
+
     init {
         val taskId = savedStateHandle.get<Int>("taskId")!!
         Log.d("ViewModel", "Полученный taskId: $taskId")  // 🔍 Проверка
@@ -62,6 +66,9 @@ class AddEditTaskViewModel @Inject constructor(
                 pomodoroRepository.getSessionsForTask(taskId)
                     .collect { list ->
                         _pomodoroSessions.value = list
+                        // Пересчитываем сумму work+rest для всех сессий
+                        _totalPomodoroTimeMs.value =
+                            list.sumOf { it.workDuration + it.restDuration }
                     }
 
             }

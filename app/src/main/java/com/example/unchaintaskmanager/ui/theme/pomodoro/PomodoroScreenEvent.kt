@@ -7,5 +7,7 @@ sealed class PomodoroScreenEvent {
     object OnResumePomodoro: PomodoroScreenEvent()
     object OnRestartPomodoro: PomodoroScreenEvent()
     object onFinishPomodoro: PomodoroScreenEvent()
-
+    object plusFiveMinutesToPomodoro: PomodoroScreenEvent()
+    object plusFifteenMinutesToPomodoro: PomodoroScreenEvent()
+    object plusThirtyMinutesToPomodoro: PomodoroScreenEvent()
 }

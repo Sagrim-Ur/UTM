@@ -1,6 +1,7 @@
 package com.example.unchaintaskmanager
 
-import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -34,11 +35,71 @@ import com.example.unchaintaskmanager.ui.theme.task_list.AddEditTaskScreen
 import com.example.unchaintaskmanager.ui.theme.task_list.TaskListScreen
 import com.example.unchaintaskmanager.util.Routes
 import dagger.hilt.android.AndroidEntryPoint
+import android.Manifest
+import android.app.AlertDialog
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    // 1) Лончер для запроса одного разрешения
+    private val requestNotificationsPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { isGranted: Boolean ->
+            if (isGranted) {
+                // Пользователь согласился — ничего больше делать не нужно
+            } else {
+                // Разрешение не дано — можно показать объясняющий диалог или просто игнорировать
+                Toast.makeText(this, "Без уведомлений Pomodoro может не сработать правильно", Toast.LENGTH_LONG).show()
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        /*
+        // Если Android 13+ — проверяем и запрашиваем POST_NOTIFICATIONS
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_NOTIF
+                )
+            }
+        }
+*/
+        // 2) В onCreate проверяем и запускаем лончер при необходимости
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            when {
+                ContextCompat.checkSelfPermission(
+                    this, Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED -> {
+                    // Уже есть разрешение
+                }
+                shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS) -> {
+                    // Здесь можно показать свой образовательный UI перед запросом
+                    AlertDialog.Builder(this)
+                        .setTitle("Нужны уведомления")
+                        .setMessage("Чтобы Pomodoro-таймер уведомлял вас о паузах и перерывах, нужны уведомления.")
+                        .setPositiveButton("Разрешить") { _, _ ->
+                            requestNotificationsPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        .setNegativeButton("Отмена", null)
+                        .show()
+                }
+                else -> {
+                    // Непосредственный запрос разрешения
+                    requestNotificationsPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        }
+
+
+
         enableEdgeToEdge()
         setContent {
             UnchainTaskManagerTheme {
@@ -49,6 +110,8 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+
 
 @Composable
 fun AppNavigation()

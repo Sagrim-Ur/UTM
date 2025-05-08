@@ -1,6 +1,8 @@
 package com.example.unchaintaskmanager.dependencyinjection
 
 import android.app.Application
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.room.Room
 import com.example.unchaintaskmanager.data.MIGRATION_1_2
 import com.example.unchaintaskmanager.data.PomodoroRepository
@@ -44,9 +46,20 @@ object AppModule {
     //Этот код предоставляет объект PomodoroRepositoryImplementation, который подключается к базе данных через DAO. Использование Hilt и аннотации @Singleton позволяет гарантировать, что репозиторий создаётся один раз и автоматически доступен там, где это нужно.
     @Provides
     @Singleton
-    fun providePomodoroRepository(db: TaskDatabase): PomodoroRepository
+    fun providePomodoroRepository(db: TaskDatabase, prefs: SharedPreferences): PomodoroRepository
     {
-        return PomodoroRepositoryImplementation(db.pomodoroDao)
+        return PomodoroRepositoryImplementation(
+            dao   = db.pomodoroDao,
+            prefs = prefs)
     }
+
+    @Provides
+    @Singleton
+    fun provideSharedPreferences(app: Application): SharedPreferences {
+        // "pomodoro_prefs" — имя файла настроек,
+        // MODE_PRIVATE — доступ только вашему приложению
+        return app.getSharedPreferences("pomodoro_prefs", Context.MODE_PRIVATE)
+    }
+
 
 }

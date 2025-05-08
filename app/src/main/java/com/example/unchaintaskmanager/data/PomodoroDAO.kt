@@ -26,4 +26,7 @@ interface PomodoroDAO {
 
     @Query("SELECT * FROM PomodoroSession WHERE linkedTaskId = :taskId ORDER BY startTime DESC")
     fun getSessionsForTask(taskId: Int): Flow<List<PomodoroSession>>
+
+    @Query("SELECT * FROM PomodoroSession WHERE pomodoroId = :id")
+    suspend fun getSessionById(id: Int): PomodoroSession?
 }
